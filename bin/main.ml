@@ -215,7 +215,7 @@ let test_snapshot_isolation_write_write_conflict () =
 
   let (c2, r) = exec c2 "set" ["a"; "2"] in
   print_endline r;
-  let _ = exec c2 "commit" [] in
+  let _ = exec c2 "abort" [] in
 
   let c3 = Connection.make c2.db in
   let (c3, r) = exec c3 "begin" [] in
@@ -267,7 +267,7 @@ let test_serializable_isolation_readwrite_conflict () =
   let (c2, r) = exec c2 "get" ["a"] in
   print_endline r;
   assert (r = "");
-  let _ = exec c2 "commit" [] in
+  let _ = exec c2 "abort" [] in
 
   let (c3, r) = exec c3 "set" ["b"; "2"] in
   print_endline r;

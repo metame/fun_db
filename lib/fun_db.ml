@@ -7,13 +7,8 @@ let assert_eq a b prefix =
   then Ok(true)
   else Error("a b neq " ^ prefix)
 
- (* var DEBUG = slices.Contains(os.Args, "--debug") *)
-
-let _debug a =
-  (* if DEBUG = false { return } *)
-
-  let args = ["hey"; "you"; "guys"; a] in
-  print_endline @@ List.fold_right (^) args ""
+(* leaving this here jic I ever want to impl debug logging (right now everything is logged)*)
+(* var DEBUG = slices.Contains(os.Args, "--debug") *)
 
 type value = {
     tx_start_id : int;
@@ -99,21 +94,31 @@ module Database =
 
     let sets_share_item s1 s2 = not (StringSet.disjoint s1 s2)
 
-    (* TODO: this should return a result *)
+    let is_conflicted db tx =
+      match tx.state, tx.isolation with
+      | Committed, Snapshot ->
+         if has_conflict db tx (fun tx1 tx2 -> sets_share_item tx1.writeset tx2.writeset)
+         then Error "write-write conflict"
+         else Ok ()
+      | Committed, Serializable ->
+         if has_conflict db tx (fun tx1 tx2 -> sets_share_item tx1.readset tx2.writeset
+                                              || sets_share_item tx1.writeset tx2.readset)
+         then Error "read-write conflict"
+         else Ok ()
+      | _ -> Ok ()
+
     let rec complete_transaction db tx state =
       (* debug("completing transaction ", t.id) *)
-      if state = Committed
-         && ((tx.isolation = Snapshot
-              && has_conflict db tx (fun tx1 tx2 -> sets_share_item tx1.writeset tx2.writeset))
-             || (tx.isolation = Serializable
-                 && has_conflict db tx (fun tx1 tx2 -> sets_share_item tx1.readset tx2.writeset
-                                                       || sets_share_item tx1.writeset tx2.readset)))
+      match is_conflicted db tx with
+      | Error e ->
+         Format.printf "complete tx failed for id %d" tx.id;
+         let* _ = complete_transaction db tx Aborted in
+         Error e
+      | Ok () ->
+         let tx = {tx with state = state} in
+         Ok (Hashtbl.replace db.transactions tx.id tx)
 
                          (* Error "write-write conflict" *)
-      then let _ = print_endline @@ "complete tx failed for id " ^ Int.to_string tx.id in
-           complete_transaction db tx Aborted
-      else let tx = {tx with state = state} in
-      Hashtbl.replace db.transactions tx.id tx
 
     (* should just change name to get_transaction *)
     let transaction_state db tx_id =
@@ -187,17 +192,18 @@ module Connection =
       let* _ = assert_eq c.tx None "no running transactions" in
       let (db, tx) = Database.new_transaction c.db in
       let* tx = Database.assert_valid_transaction db (Some tx) in
-      Ok(({c with db = db; tx = Some tx}, Int.to_string tx.id))
+      Ok ({c with db = db; tx = Some tx}, Int.to_string tx.id)
 
     let abort_tx c =
       let* tx = Database.assert_valid_transaction c.db c.tx in
-      Database.complete_transaction c.db tx Aborted;
-      Ok({c with tx = None}, "")
+      Result.map (fun _ -> ({c with tx = None}, ""))
+        @@ Database.complete_transaction c.db tx Aborted
+
 
     let commit_tx c =
       let* tx = Database.assert_valid_transaction c.db c.tx in
-      Database.complete_transaction c.db tx Committed;
-      Ok({c with tx = None}, "")
+      Result.map (fun _ -> ({c with tx = None}, ""))
+        @@ Database.complete_transaction c.db tx Committed
 
     let get c args =
       print_endline @@ "get on connection " ^ Int.to_string c.id;
@@ -211,7 +217,7 @@ module Connection =
       let v = List.find_opt (Database.is_visible c.db tx) vs in
       let v = Option.map (fun v -> v.value) v in
       let v = Option.value ~default:"" v in
-      Ok({c with tx = Some(tx)}, v)
+      Ok ({c with tx = Some(tx)}, v)
 
     let invalidate_versions db tx vs =
       List.fold_left_map (fun f v -> if Database.is_visible db tx v
@@ -230,7 +236,7 @@ module Connection =
       let* value = Option.to_result ~none:"no val provided" (List.nth_opt args 1) in
       let value = {tx_start_id = tx.id; tx_end_id = 0; value} in
       Hashtbl.replace c.db.store key (value :: vs);
-      Ok({c with tx = Some(tx)}, value.value)
+      Ok ({c with tx = Some(tx)}, value.value)
 
     let delete c args =
       let* tx = Database.assert_valid_transaction c.db c.tx in
@@ -242,7 +248,7 @@ module Connection =
       let writeset = StringSet.add key tx.writeset in
       let tx = Database.update_transaction c.db {tx with writeset = writeset} in
       Hashtbl.replace c.db.store key vs;
-      Ok({c with tx = Some(tx)}, "")
+      Ok ({c with tx = Some(tx)}, "")
 
     let exec_command c command args =
       (* debug(command, args) *)
@@ -258,7 +264,7 @@ module Connection =
     let must_exec_command c command args =
       let r = exec_command c command args in
       match r with
-      | Ok(r) -> Ok r
-      | Error(e) -> Error ("unexpected error " ^ e)
+      | Ok r -> Ok r
+      | Error e -> Error ("unexpected error " ^ e)
 
   end
